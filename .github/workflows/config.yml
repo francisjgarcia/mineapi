@@ -1,0 +1,146 @@
+name: Building and deploying
+
+on:
+  push:
+    branches:
+      - development
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: .
+
+jobs:
+  setup:
+    name: Obtaining repository
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || github.ref == 'refs/heads/development' && 'development' || '' }}
+    steps:
+      - name: Use repository
+        uses: actions/checkout@v3
+      - name: Upload repository
+        uses: actions/upload-artifact@v3
+        with:
+          name: repository
+          path: |
+            ${{ github.workspace }}/app
+            ${{ github.workspace }}/infra
+            ${{ github.workspace }}/.dockerignore
+
+  build:
+    name: Building docker image
+    needs: [setup]
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || github.ref == 'refs/heads/development' && 'development' || '' }}
+    steps:
+      - name: Download repository
+        uses: actions/download-artifact@v3
+        with:
+          name: repository
+      - name: Login to GitHub Packages
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PAT }}
+      - name: Get image tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo IMAGE_TAG=$(echo "${GITHUB_REF##*/}" | cut -c1-) >> $GITHUB_ENV
+      - name: Get image tag
+        if: github.ref == 'refs/heads/development'
+        run: |
+          echo IMAGE_TAG="development" >> $GITHUB_ENV
+      - name: Build and push image to GitHub Packages
+        uses: docker/build-push-action@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          push: true
+          file: ./infra/docker/Dockerfile
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}
+            ghcr.io/${{ github.repository }}:latest
+      - name: Build and push image to GitHub Packages
+        uses: docker/build-push-action@v4
+        if: (github.ref == 'refs/heads/development')
+        with:
+          push: true
+          file: ./infra/docker/Dockerfile
+          tags: ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}
+
+  release:
+    name: Creating release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: "Determine tag"
+        run: "echo \"RELEASE_TAG=${GITHUB_REF#refs/tags/}\" >> $GITHUB_ENV"
+      - name: "Create release"
+        uses: "actions/github-script@v6"
+        with:
+          github-token: "${{ secrets.GHCR_PAT }}"
+          script: |
+            try {
+              const response = await github.rest.repos.createRelease({
+                draft: false,
+                generate_release_notes: true,
+                name: "Release " + process.env.RELEASE_TAG,
+                owner: context.repo.owner,
+                prerelease: false,
+                repo: context.repo.repo,
+                tag_name: process.env.RELEASE_TAG,
+              });
+
+              core.exportVariable('RELEASE_ID', response.data.id);
+              core.exportVariable('RELEASE_UPLOAD_URL', response.data.upload_url);
+            } catch (error) {
+              core.setFailed(error.message);
+            }
+
+  deploy:
+    name: Provisioning infrastructure
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ github.ref == 'refs/heads/master' && 'production' || github.ref == 'refs/heads/development' && 'development' }}
+    steps:
+      - name: Download repository
+        uses: actions/download-artifact@v3
+        with:
+          name: repository
+
+      - name: Add SSH private key
+        run: |
+          ssh-agent -a $SSH_AUTH_SOCK > /dev/null   
+          ssh-add - <<< "${{ secrets.SSH_PRIVATE_KEY }}"
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+
+      - name: Run ansible script
+        shell: bash 
+        run: |
+          ANSIBLE_HOST_KEY_CHECKING=False \
+          ansible-playbook -u root -i '${{ vars.SERVER_HOST }},' ansible/playbooks/main.yml
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          REPOSITORY_USERNAME: ${{ github.repository_owner }}
+          IMAGE_NAME: ${{ github.repository }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          EXPOSE_PORT: ${{ vars.EXPOSE_PORT }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          DEBUG: ${{ vars.DEBUG }}
+          ALLOWED_HOSTS: ${{ vars.ALLOWED_HOSTS }}
+          SERVER_NAME: ${{ vars.SERVER_NAME }}
+          SERVER_HOST: ${{ vars.SERVER_HOST }}
+          SERVER_PORT: ${{ vars.SERVER_PORT }}

@@ -1,0 +1,47 @@
+---
+- name: Deploy service
+  hosts: all
+
+  tasks:
+    - name: Log into github private registry
+      docker_login:
+        registry: ghcr.io
+        username: "{{ lookup('env', 'REPOSITORY_USERNAME') }}"
+        password: "{{ lookup('env', 'GHCR_PAT') }}"
+
+    - name: Pull docker image
+      docker_image:
+        name: "ghcr.io/{{ lookup('env', 'IMAGE_NAME') }}"
+        tag: "{{ lookup('env', 'IMAGE_TAG') }}"
+        source: pull
+        force_source: yes
+
+    - name: Create docker network
+      docker_network:
+        name: minecraft
+
+    - name: Run minedisbot service
+      docker_container:
+        name: mineapi
+        image: "ghcr.io/{{ lookup('env', 'IMAGE_NAME') }}:{{ lookup('env', 'IMAGE_TAG') }}"
+        published_ports:
+          - "{{ lookup('env', 'EXPOSE_PORT') }}:8000"
+        networks:
+          - name: minecraft
+        volumes:
+          - /storage/minecraft/data/mods:/minecraft/mods
+        env:
+          SECRET_KEY: "{{ lookup('env', 'SECRET_KEY') }}"
+          DEBUG: "{{ lookup('env', 'DEBUG') }}"
+          ALLOWED_HOSTS: "{{ lookup('env', 'ALLOWED_HOSTS') }}"
+          SERVER_NAME: "{{ lookup('env', 'SERVER_NAME') }}"
+          SERVER_HOST: "{{ lookup('env', 'SERVER_HOST') }}"
+          SERVER_PORT: "{{ lookup('env', 'SERVER_PORT') }}"
+        container_default_behavior: no_defaults
+        recreate: yes
+        state: started
+        restart_policy: always
+
+    - name: Prune docker images
+      community.docker.docker_prune:
+        images: yes

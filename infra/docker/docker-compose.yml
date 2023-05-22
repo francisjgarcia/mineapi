@@ -1,0 +1,22 @@
+version: '3.8'
+services:
+  mineapi:
+    container_name: mineapi
+    image: ${API_IMAGE_NAME:-mineapi}:latest
+    build:
+      context: ../../
+      dockerfile: infra/docker/Dockerfile
+    ports:
+      - ${API_EXPOSE_PORT:-8000}:8000
+    volumes:
+      - ../../app:/usr/src/app
+      - ${MODS_DIR:-/minecraft/mods}:/minecraft/mods
+    env_file:
+      - ../../app/.env
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+        reservations:
+          memory: 100M
+    restart: on-failure:5
